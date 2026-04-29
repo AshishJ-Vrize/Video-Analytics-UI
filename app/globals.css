@@ -1,26 +1,79 @@
 @import "tailwindcss";
 
+/* Class-based dark mode — controlled by next-themes */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ── Light mode tokens ────────────────────────────── */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg:               #e8e7e5;
+  --surface:          #f5f4f2;
+  --foreground:       #171717;
+  --muted:            #6b7280;
+  --border:           rgba(0, 0, 0, 0.12);
+  --bubble-assistant: #ebebea;
 }
 
+/* ── Dark mode tokens ─────────────────────────────── */
+.dark {
+  --bg:               #1a1a1a;
+  --surface:          #242424;
+  --foreground:       #ffffff;
+  --muted:            #9ca3af;
+  --border:           rgba(255, 255, 255, 0.1);
+  --bubble-assistant: #2e2e2e;
+}
+
+/* ── Static design tokens ─────────────────────────── */
+@theme {
+  --color-accent: #dc2626;
+}
+
+/* ── Semantic tokens (reference runtime CSS vars) ─── */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-bg:               var(--bg);
+  --color-surface:          var(--surface);
+  --color-foreground:       var(--foreground);
+  --color-muted:            var(--muted);
+  --color-border:           var(--border);
+  --color-bubble-assistant: var(--bubble-assistant);
+  --font-sans:              var(--font-geist-sans);
+  --font-mono:              var(--font-geist-mono);
 }
 
 body {
-  background: var(--background);
+  background-color: var(--bg);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* ── Markdown content styles ──────────────────────── */
+.markdown { line-height: 1.7; }
+.markdown h1, .markdown h2, .markdown h3 { font-weight: 600; margin: 1rem 0 0.5rem; }
+.markdown h1 { font-size: 1.25rem; }
+.markdown h2 { font-size: 1.1rem; }
+.markdown h3 { font-size: 1rem; }
+.markdown p { margin: 0.5rem 0; }
+.markdown p:first-child { margin-top: 0; }
+.markdown p:last-child  { margin-bottom: 0; }
+.markdown ul, .markdown ol { padding-left: 1.4rem; margin: 0.5rem 0; }
+.markdown ul { list-style-type: disc; }
+.markdown ol { list-style-type: decimal; }
+.markdown li { margin: 0.25rem 0; }
+.markdown strong { font-weight: 600; }
+.markdown em { font-style: italic; }
+.markdown a { color: var(--color-accent); text-decoration: underline; }
+.markdown blockquote { border-left: 3px solid var(--color-accent); padding-left: 0.75rem; color: var(--muted); margin: 0.5rem 0; }
+.markdown hr { border: none; border-top: 1px solid var(--border); margin: 1rem 0; }
+.markdown code { font-family: var(--font-mono); font-size: 0.8em; background: rgba(0,0,0,0.2); border-radius: 4px; padding: 0.1em 0.35em; }
+.markdown pre { background: rgba(0,0,0,0.25); border-radius: 0.5rem; padding: 1rem; overflow-x: auto; margin: 0.75rem 0; }
+.markdown pre code { background: none; padding: 0; font-size: 0.85em; }
+.markdown table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 0.875rem; }
+.markdown th, .markdown td { border: 1px solid var(--border); padding: 0.5rem 0.75rem; text-align: left; }
+.markdown th { font-weight: 600; background: rgba(0,0,0,0.15); }
+
+.login-glow {
+  background: radial-gradient(ellipse at top, rgba(220, 38, 38, 0.05) 0%, transparent 55%);
+}
+
+.dark .login-glow {
+  background: radial-gradient(ellipse at top, rgba(220, 38, 38, 0.13) 0%, transparent 60%);
 }
