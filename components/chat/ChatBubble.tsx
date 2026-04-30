@@ -3,20 +3,39 @@
 import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import CommandCard from '@/components/chat/CommandCard';
+import type { CommandResultData } from '@/components/chat/CommandCard';
+
+export interface MessageSource {
+  source_type: string;
+  meeting_id: string;
+  meeting_title: string;
+  meeting_date: string | null;
+  speaker_name: string | null;
+  timestamp_display: string | null;
+  similarity_score: number | null;
+}
 
 export interface Message {
   id: string;
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'command';
   content: string;
+  commandData?: CommandResultData;
+  sources?: MessageSource[];
+  suggestions?: string[];
 }
 
 interface ChatBubbleProps {
   message: Message;
   onEdit?: (id: string, newText: string) => void;
   onRegenerate?: (id: string) => void;
+  onSourceClick?: (meetingId: string, meetingTitle: string) => void;
+  onSuggestionClick?: (text: string) => void;
 }
 
-export default function ChatBubble({ message, onEdit, onRegenerate }: ChatBubbleProps) {
+export default function ChatBubble({ message, onEdit, onRegenerate, onSourceClick, onSuggestionClick }: ChatBubbleProps) {
+  if (message.role === 'command') return <CommandCard data={message.commandData!} />;
+
   const isUser = message.role === 'user';
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -93,6 +112,49 @@ export default function ChatBubble({ message, onEdit, onRegenerate }: ChatBubble
         )}
       </div>
 
+      {/* Source cards — assistant only */}
+      {!isUser && message.sources && message.sources.length > 0 && (
+        <div className="flex gap-2 flex-wrap mt-2 max-w-[75%]">
+          {message.sources.map((s, i) => (
+            <button
+              key={`${s.meeting_id}-${i}`}
+              onClick={() => onSourceClick?.(s.meeting_id, s.meeting_title)}
+              className="text-left rounded-xl border border-border bg-surface px-3 py-2.5 hover:border-accent/50 hover:bg-accent/5 transition-all min-w-[160px] max-w-[200px]"
+            >
+              <p className="text-xs font-medium text-foreground truncate">{s.meeting_title || 'Untitled'}</p>
+              {s.meeting_date && (
+                <p className="text-[11px] text-muted mt-0.5">{fmtDate(s.meeting_date)}</p>
+              )}
+              {s.source_type !== 'metadata' && s.speaker_name && (
+                <p className="text-[11px] text-muted mt-0.5 truncate">
+                  {s.speaker_name}{s.timestamp_display ? ` · ${s.timestamp_display}` : ''}
+                </p>
+              )}
+              {s.similarity_score != null && (
+                <p className="text-[11px] text-accent/80 mt-1">
+                  {Math.round(s.similarity_score * 100)}% match
+                </p>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Suggestion pills — assistant only, aligned right */}
+      {!isUser && message.suggestions && message.suggestions.length > 0 && (
+        <div className="flex gap-2 flex-wrap mt-2 justify-end w-full">
+          {message.suggestions.map((s, i) => (
+            <button
+              key={i}
+              onClick={() => onSuggestionClick?.(s)}
+              className="rounded-full border border-border px-3 py-1.5 text-xs text-muted hover:border-accent/50 hover:text-foreground hover:bg-accent/5 transition-all"
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Action buttons — visible on hover */}
       <div className={`flex gap-0.5 mt-1 opacity-0 group-hover:opacity-100 transition-opacity
         ${isUser ? 'flex-row-reverse' : 'flex-row'}`}
@@ -118,6 +180,10 @@ export default function ChatBubble({ message, onEdit, onRegenerate }: ChatBubble
       </div>
     </div>
   );
+}
+
+function fmtDate(iso: string) {
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 function ActionButton({ onClick, label, children }: {

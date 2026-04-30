@@ -1,22 +1,59 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useMsal } from '@azure/msal-react';
 import { InteractionStatus } from '@azure/msal-browser';
 import { useTheme } from 'next-themes';
 import { loginRequest } from '@/lib/msal-config';
 
 export default function LoginPage() {
-  const { instance, inProgress } = useMsal();
+  const { instance, inProgress, accounts } = useMsal();
   const { theme, setTheme } = useTheme();
+  const router = useRouter();
+  const [error, setError] = useState<string | null>(null);
 
   const busy = inProgress !== InteractionStatus.None;
 
+  // After loginRedirect completes, Microsoft sends the browser back to /login
+  // with #code=... in the URL. MsalProvider processes it (handleRedirectPromise),
+  // populates `accounts`, then inProgress returns to None.
+  // At that point we acquire a token silently and call auth/me.
+  useEffect(() => {
+    if (accounts.length === 0 || inProgress !== InteractionStatus.None) return;
+
+    const account = accounts[0];
+    instance
+      .acquireTokenSilent({ ...loginRequest, account })
+      .then((result) =>
+        fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/auth/me`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${result.idToken}` },
+        })
+      )
+      .then((resp) => {
+        if (resp.ok) {
+          router.replace('/chat');
+        } else {
+          setError('Authentication failed. Your account may not be registered on this platform.');
+        }
+      })
+      .catch((err) => {
+        console.error(err);
+        setError('Authentication error. Please try again.');
+      });
+  }, [accounts, inProgress, instance, router]);
+
   const handleSignIn = async () => {
     if (busy) return;
+    setError(null);
     try {
-      await instance.loginPopup(loginRequest);
+      // loginRedirect: full-page redirect — no popup, no cross-window MSAL state issues.
+      // Microsoft redirects back to redirectUri (/login) with the auth code.
+      await instance.loginRedirect(loginRequest);
     } catch (e) {
       console.error(e);
+      setError('Sign-in was cancelled or an error occurred. Please try again.');
     }
   };
 
@@ -27,7 +64,7 @@ export default function LoginPage() {
 
       <div className="relative z-10 w-full max-w-md rounded-2xl bg-surface border-t-4 border-accent shadow-2xl p-8 flex flex-col items-center gap-6">
 
-        {/* Theme toggle — theme !== 'light' covers both 'dark' and undefined (default is dark) */}
+        {/* Theme toggle */}
         <button
           onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
           className="absolute top-4 right-4 p-1.5 rounded-md text-muted hover:text-foreground transition-colors"
@@ -47,15 +84,19 @@ export default function LoginPage() {
           <p className="text-sm text-muted mt-1">Meeting Intelligence Platform</p>
         </div>
 
-        {/* Sign in with Microsoft — outlined with red accent border */}
+        {/* Sign in with Microsoft */}
         <button
           onClick={handleSignIn}
           disabled={busy}
           className="flex items-center justify-center gap-3 w-full rounded-xl border border-accent/40 bg-surface px-4 py-3 text-foreground font-normal hover:border-accent hover:bg-accent/5 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <MicrosoftIcon />
-          Sign in with Microsoft
+          {busy ? 'Signing in…' : 'Sign in with Microsoft'}
         </button>
+
+        {error && (
+          <p className="text-xs text-red-500 text-center -mt-2">{error}</p>
+        )}
 
         {/* Footer */}
         <div className="text-center flex flex-col gap-1">

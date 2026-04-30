@@ -24,14 +24,16 @@ export default function Sidebar({
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
 
+  const isMobile = () => typeof window !== 'undefined' && window.innerWidth < 768;
+
   const handleSelect = (id: string) => {
     onSelect(id);
-    onClose();
+    if (isMobile()) onClose();
   };
 
   const handleNewChat = () => {
     onNewChat();
-    onClose();
+    if (isMobile()) onClose();
   };
 
   return (
@@ -71,7 +73,11 @@ export default function Sidebar({
           <div className="px-3 pb-2">
             <button
               onClick={handleNewChat}
-              className="flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm text-muted hover:text-foreground hover:bg-accent/6 transition-colors"
+              className={`flex items-center gap-2 w-full rounded-lg px-3 py-2 text-sm transition-colors ${
+                activeId === null
+                  ? 'bg-bg border-l-2 border-accent text-foreground font-medium pl-[10px]'
+                  : 'text-muted hover:text-foreground hover:bg-accent/6'
+              }`}
             >
               <PlusIcon className="w-4 h-4 shrink-0" />
               New chat
@@ -102,10 +108,11 @@ export default function Sidebar({
                     onChange={(e) => setRenameValue(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') {
-                        onRename(conv.id, renameValue.trim() || conv.title);
+                        e.currentTarget.blur();
+                      }
+                      if (e.key === 'Escape') {
                         setRenamingId(null);
                       }
-                      if (e.key === 'Escape') setRenamingId(null);
                     }}
                     onBlur={() => {
                       onRename(conv.id, renameValue.trim() || conv.title);

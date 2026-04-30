@@ -19,8 +19,10 @@ export default function TopBar({ onToggleSidebar }: TopBarProps) {
     .join('')
     .toUpperCase() ?? 'U';
 
-  const handleSignOut = () =>
+  const handleSignOut = () => {
+    localStorage.removeItem('va_chat_active');
     instance.logoutRedirect({ postLogoutRedirectUri: '/login' });
+  };
 
   return (
     <div className="flex items-center h-14 px-4 shrink-0 relative z-10">
