@@ -1,0 +1,63 @@
+name: Build and Deploy Frontend to Azure
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  ACR_NAME: ${{ secrets.ACR_NAME }}
+  IMAGE_NAME: va-frontend
+  CONTAINER_APP_NAME: ${{ secrets.FRONTEND_CONTAINER_APP_NAME }}
+  RESOURCE_GROUP: ${{ secrets.RESOURCE_GROUP }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Log in to ACR
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Build and push image
+        env:
+          IMAGE_TAG: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+        run: |
+          docker build \
+            --build-arg NEXT_PUBLIC_AZURE_CLIENT_ID=${{ secrets.NEXT_PUBLIC_AZURE_CLIENT_ID }} \
+            --build-arg NEXT_PUBLIC_AZURE_TENANT_ID=${{ secrets.NEXT_PUBLIC_AZURE_TENANT_ID }} \
+            --build-arg NEXT_PUBLIC_API_BASE_URL=${{ secrets.NEXT_PUBLIC_API_BASE_URL }} \
+            -t "$IMAGE_TAG" .
+          docker push "$IMAGE_TAG"
+
+      - name: Configure ACR registry on Container App
+        env:
+          APP_NAME: ${{ env.CONTAINER_APP_NAME }}
+          RG: ${{ env.RESOURCE_GROUP }}
+          ACR_SERVER: ${{ env.ACR_NAME }}.azurecr.io
+          ACR_USER: ${{ secrets.ACR_USERNAME }}
+          ACR_PASS: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          APP=$(echo "$APP_NAME" | tr -d '[:space:]')
+          RG=$(echo "$RG" | tr -d '[:space:]')
+          SERVER=$(echo "$ACR_SERVER" | tr -d '[:space:]')
+          az containerapp registry set --name "$APP" --resource-group "$RG" --server "$SERVER" --username "$ACR_USER" --password "$ACR_PASS"
+
+      - name: Deploy to Container Apps
+        env:
+          IMAGE_TAG: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          APP_NAME: ${{ env.CONTAINER_APP_NAME }}
+          RG: ${{ env.RESOURCE_GROUP }}
+        run: |
+          APP=$(echo "$APP_NAME" | tr -d '[:space:]')
+          RG=$(echo "$RG" | tr -d '[:space:]')
+          IMG=$(echo "$IMAGE_TAG" | tr -d '[:space:]')
+          az containerapp update --name "$APP" --resource-group "$RG" --image "$IMG"
