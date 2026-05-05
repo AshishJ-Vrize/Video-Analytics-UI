@@ -1,386 +1,239 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useMsal } from '@azure/msal-react';
-import { InteractionRequiredAuthError, InteractionStatus } from '@azure/msal-browser';
+import { InteractionStatus } from '@azure/msal-browser';
 import { loginRequest } from '@/lib/msal-config';
-import Sidebar, { Conversation } from '@/components/chat/Sidebar';
-import TopBar from '@/components/chat/TopBar';
-import ChatBubble, { Message, MessageSource } from '@/components/chat/ChatBubble';
-import InputBar, { MeetingOption } from '@/components/chat/InputBar';
-import type { CommandResultData } from '@/components/chat/CommandCard';
-import { fetchCalendarEvents } from '@/lib/graph';
+import {
+  listMeetings,
+  postChat,
+  type ChatResponse,
+  type MeetingItem,
+  type AccessFilter,
+  type RbacScopeInfoOut,
+} from '@/lib/chat-api';
+import Sidebar from '@/components/chat/Sidebar';
+import ChatThread, { type ChatTurn } from '@/components/chat/ChatThread';
+import ChatInput from '@/components/chat/ChatInput';
+import AccessFilterToggle from '@/components/chat/AccessFilterToggle';
 
-const SUGGESTIONS = [
-  'Summarize my last meeting',
-  'What were the action items?',
-  'Who spoke the most?',
-  'Show key decisions made',
-];
+const HELP_TEXT = `**Available commands**
+
+- **/help** — show this message
+- **/meetings** — list all meetings you have access to
+- **/attended** — list meetings you actually attended
+
+You can also just ask in plain English ("what did Sarah say about pricing?",
+"summarise yesterday's standup", "compare these two demos").
+
+**Tips**
+- Click meetings on the left to scope your question to them.
+- Use the All / Attended / Granted toggle to filter what's searchable.
+- Ask follow-ups — the bot remembers prior turns in this session.`;
 
 export default function ChatPage() {
   const { instance, accounts, inProgress } = useMsal();
   const router = useRouter();
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sessionsLoaded, setSessionsLoaded] = useState(false);
-  const [meetings, setMeetings] = useState<MeetingOption[]>([]);
-  const [activeScopeMeetingId, setActiveScopeMeetingId] = useState<string | undefined>(undefined);
-  const bottomRef = useRef<HTMLDivElement>(null);
 
-  const isEmpty = messages.length === 0 && !loading;
+  // Auth
+  const [idToken, setIdToken] = useState<string | null>(null);
 
-  // Auth guard — redirect to /login if no account after MSAL finishes loading
+  // Sidebar
+  const [meetings, setMeetings] = useState<MeetingItem[]>([]);
+  const [loadingMeetings, setLoadingMeetings] = useState(true);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // Chat
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [accessFilter, setAccessFilter] = useState<AccessFilter>('all');
+  const [sending, setSending] = useState(false);
+  const [rbacInfo, setRbacInfo] = useState<RbacScopeInfoOut | null>(null);
+
+  // ── Auth guard ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (inProgress === InteractionStatus.None && accounts.length === 0) {
       router.replace('/login');
     }
   }, [accounts, inProgress, router]);
 
+  // ── Acquire token + load meetings ──────────────────────────────────────────
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  // Persist active session across refreshes
-  useEffect(() => {
-    if (activeId) {
-      localStorage.setItem('va_chat_active', activeId);
-    } else {
-      localStorage.removeItem('va_chat_active');
-    }
-  }, [activeId]);
-
-  // Load past sessions once MSAL is ready, then restore last active session
-  useEffect(() => {
-    if (sessionsLoaded) return;
     if (inProgress !== InteractionStatus.None || accounts.length === 0) return;
+    let cancelled = false;
 
-    setSessionsLoaded(true);
-    getToken()
-      .then(async (token) => {
-        const headers = { Authorization: `Bearer ${token}` };
-        const base = process.env.NEXT_PUBLIC_API_BASE_URL;
-        const [sessionsRes, meetingsRes] = await Promise.all([
-          fetch(`${base}/chat/sessions`, { headers }),
-          fetch(`${base}/api/v1/meetings`, { headers }),
-        ]);
-        const sessions: { id: string; title: string }[] = sessionsRes.ok ? await sessionsRes.json() : [];
-        const meetingItems: { id: string; meeting_subject: string }[] = meetingsRes.ok ? await meetingsRes.json() : [];
-        return { sessions, meetingItems };
-      })
-      .then(({ sessions, meetingItems }) => {
-        setConversations(sessions.map((s) => ({ id: s.id, title: s.title })));
-        setMeetings(meetingItems.map((m) => ({ id: String(m.id), title: m.meeting_subject })));
-
-        const savedId = localStorage.getItem('va_chat_active');
-        const targetId =
-          savedId && sessions.find((s) => s.id === savedId)
-            ? savedId
-            : sessions[0]?.id ?? null;
-
-        if (targetId) handleSelectConversation(targetId);
-      })
-      .catch(console.error);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inProgress, accounts, sessionsLoaded]);
-
-  const getToken = async (): Promise<string> => {
-    try {
-      const response = await instance.acquireTokenSilent({
-        ...loginRequest,
-        account: accounts[0],
-      });
-      return response.idToken;
-    } catch (err) {
-      if (err instanceof InteractionRequiredAuthError) {
-        await instance.loginRedirect(loginRequest);
-      }
-      throw err;
-    }
-  };
-
-  const handleSelectConversation = async (id: string) => {
-    setActiveId(id);
-    setMessages([]);
-    try {
-      const token = await getToken();
-      const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_BASE_URL}/chat/sessions/${id}/messages`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (!res.ok) return;
-      const msgs: { id: string; role: string; content: string; citations?: MessageSource[] }[] = await res.json();
-      setMessages(
-        msgs.map((m) => ({
-          id: m.id,
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-          sources: m.citations ?? [],
-        }))
-      );
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const handleDeleteConversation = async (id: string) => {
-    setConversations((prev) => prev.filter((c) => c.id !== id));
-    if (activeId === id) {
-      setActiveId(null);
-      setMessages([]);
-    }
-    try {
-      const token = await getToken();
-      await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/chat/sessions/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const handleEdit = (messageId: string, newText: string) => {
-    const index = messages.findIndex((m) => m.id === messageId);
-    if (index === -1) return;
-    setMessages((prev) => prev.slice(0, index));
-    handleSend(newText);
-  };
-
-  const handleRegenerate = (messageId: string) => {
-    const index = messages.findIndex((m) => m.id === messageId);
-    if (index === -1) return;
-    const prevUserMsg = messages.slice(0, index).findLast((m) => m.role === 'user');
-    if (!prevUserMsg) return;
-    setMessages((prev) => prev.slice(0, index));
-    handleSend(prevUserMsg.content);
-  };
-
-  const handleCommand = async (cmd: string) => {
-    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: cmd };
-    const resultId = crypto.randomUUID();
-    const loadingMsg: Message = { id: resultId, role: 'command', content: '', commandData: { type: 'loading' } };
-    setMessages((prev) => [...prev, userMsg, loadingMsg]);
-
-    let result: CommandResultData;
-    try {
-      const base = process.env.NEXT_PUBLIC_API_BASE_URL;
-      const token = await getToken();
-
-      if (cmd === '/help') {
-        result = { type: 'help' };
-
-      } else if (cmd === '/meetings') {
-        const res = await fetch(`${base}/api/v1/meetings`, {
-          headers: { Authorization: `Bearer ${token}` },
+    (async () => {
+      try {
+        const tokenRes = await instance.acquireTokenSilent({
+          ...loginRequest,
+          account: accounts[0],
         });
-        if (!res.ok) throw new Error();
-        result = { type: 'meetings', meetings: await res.json() };
+        if (cancelled) return;
+        setIdToken(tokenRes.idToken);
 
-      } else if (cmd === '/attended' || cmd === '/upcoming') {
-        // Get graph token for calendar
-        let graphToken: string;
-        try {
-          const gr = await instance.acquireTokenSilent({
-            scopes: ['Calendars.Read'],
-            account: accounts[0],
-          });
-          graphToken = gr.accessToken;
-        } catch {
-          const gr = await instance.acquireTokenPopup({
-            scopes: ['Calendars.Read'],
-            account: accounts[0],
-          });
-          graphToken = gr.accessToken;
-        }
-
-        const now = new Date();
-        if (cmd === '/upcoming') {
-          const future = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
-          const events = await fetchCalendarEvents(graphToken, now, future);
-          result = { type: 'upcoming', events };
-        } else {
-          // /attended — past 30 days
-          const past = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-          const [events, meetingsRes] = await Promise.all([
-            fetchCalendarEvents(graphToken, past, now),
-            fetch(`${base}/api/v1/meetings`, { headers: { Authorization: `Bearer ${token}` } }),
-          ]);
-          const meetings = meetingsRes.ok ? await meetingsRes.json() : [];
-          const ingestedJoinUrls = new Set<string>(
-            meetings.map((m: { join_url: string | null }) => m.join_url).filter(Boolean)
-          );
-          result = { type: 'attended', events, ingestedJoinUrls };
-        }
-
-      } else {
-        result = { type: 'error', message: `Unknown command: "${cmd}". Type /help to see available commands.` };
+        const list = await listMeetings(tokenRes.idToken, 'both');
+        if (!cancelled) setMeetings(list);
+      } catch (err) {
+        console.error('chat: load failed', err);
+      } finally {
+        if (!cancelled) setLoadingMeetings(false);
       }
-    } catch {
-      result = { type: 'error', message: 'Command failed. Please try again.' };
-    }
+    })();
 
-    setMessages((prev) =>
-      prev.map((m) => (m.id === resultId ? { ...m, commandData: result } : m))
-    );
-  };
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inProgress, accounts]);
 
-  const handleSend = async (text: string, meetingId?: string) => {
-    if (text.startsWith('/')) {
-      await handleCommand(text.trim().toLowerCase());
+  // ── Sidebar handlers ───────────────────────────────────────────────────────
+  const toggleSelected = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+
+  const applyScope = useCallback((newIds: string[]) => {
+    setSelectedIds(new Set(newIds));
+  }, []);
+
+  // ── Send the current draft to the backend ──────────────────────────────────
+  const sendQuery = useCallback(async (
+    rawText: string,
+    opts?: { resendOfTurnId?: string },
+  ) => {
+    if (!idToken) return;
+
+    // /help → client-only, no API
+    if (rawText === '/help') {
+      setTurns((prev) => [
+        ...prev,
+        { id: makeId(), role: 'user', content: rawText },
+        { id: makeId(), role: 'assistant', content: HELP_TEXT },
+      ]);
       return;
     }
 
-    // Track active meeting scope so suggestion-pill follow-ups stay scoped
-    setActiveScopeMeetingId(meetingId);
+    // Map slash commands to canned queries + filter overrides.
+    let query = rawText;
+    let perRequestFilter: AccessFilter = accessFilter;
+    let perRequestSelection: string[] | null | undefined =
+      selectedIds.size > 0 ? Array.from(selectedIds) : undefined;
 
-    const wasNew = activeId === null;
-    const userMsg: Message = { id: crypto.randomUUID(), role: 'user', content: text };
-    setMessages((prev) => [...prev, userMsg]);
-    setLoading(true);
+    if (rawText === '/meetings') {
+      query = 'List all my meetings.';
+      perRequestSelection = null;
+      perRequestFilter = 'all';
+    } else if (rawText === '/attended') {
+      query = 'List the meetings I attended.';
+      perRequestSelection = null;
+      perRequestFilter = 'attended';
+    }
+
+    const userTurnId = opts?.resendOfTurnId ? null : makeId();
+    const pendingId = makeId();
+
+    setTurns((prev) => {
+      // On retry, drop the failed assistant turn before adding the new pending one.
+      const cleaned = opts?.resendOfTurnId
+        ? prev.filter((t) => t.id !== opts.resendOfTurnId)
+        : prev;
+      const userTurn: ChatTurn[] = userTurnId
+        ? [{ id: userTurnId, role: 'user', content: rawText }]
+        : [];
+      return [
+        ...cleaned,
+        ...userTurn,
+        { id: pendingId, role: 'assistant', content: '', pending: true, originalQuery: rawText },
+      ];
+    });
+    setSending(true);
 
     try {
-      const token = await getToken();
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/chat`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          query: text,
-          session_id: activeId ?? undefined,
-          meeting_id: meetingId ?? undefined,
-        }),
+      const resp: ChatResponse = await postChat(idToken, {
+        query,
+        selected_meeting_ids: perRequestSelection,
+        access_filter: perRequestFilter,
+        session_id: sessionId,
       });
-
-      if (!res.ok) throw new Error(`API error: ${res.status}`);
-      const data = await res.json();
-      const sessionId: string = data.session_id;
-
-      if (wasNew) {
-        setActiveId(sessionId);
-        setConversations((prev) => [{ id: sessionId, title: text.slice(0, 60) }, ...prev]);
-      }
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: data.answer,
-          sources: (data.sources ?? []) as MessageSource[],
-          suggestions: data.suggestions ?? [],
-        },
-      ]);
+      setSessionId(resp.session_id);
+      setRbacInfo(resp.rbac_scope_info);
+      setTurns((prev) =>
+        prev.map((t) =>
+          t.id === pendingId
+            ? {
+                ...t,
+                content: resp.answer,
+                sources: resp.sources,
+                scopeChange: resp.scope_change,
+                outOfWindow: resp.out_of_window,
+                withinDays: resp.rbac_scope_info?.within_days,
+                pending: false,
+              }
+            : t,
+        ),
+      );
     } catch (err) {
-      setMessages((prev) => [
-        ...prev,
-        { id: crypto.randomUUID(), role: 'assistant', content: 'Something went wrong. Please try again.' },
-      ]);
-      console.error(err);
+      const msg = err instanceof Error ? err.message : 'Request failed.';
+      setTurns((prev) =>
+        prev.map((t) =>
+          t.id === pendingId
+            ? { ...t, content: `_Error:_ ${msg}`, pending: false, error: true }
+            : t,
+        ),
+      );
     } finally {
-      setLoading(false);
+      setSending(false);
     }
-  };
+  }, [accessFilter, idToken, selectedIds, sessionId]);
+
+  const handleSubmit = useCallback((text: string) => sendQuery(text), [sendQuery]);
+
+  const handleRetry = useCallback((turn: ChatTurn) => {
+    if (!turn.originalQuery) return;
+    sendQuery(turn.originalQuery, { resendOfTurnId: turn.id });
+  }, [sendQuery]);
 
   return (
-    <>
+    <main className="flex h-screen w-full bg-bg text-foreground">
       <Sidebar
-        conversations={conversations}
-        activeId={activeId}
-        onSelect={handleSelectConversation}
-        onNewChat={() => { setActiveId(null); setMessages([]); setActiveScopeMeetingId(undefined); localStorage.removeItem('va_chat_active'); }}
-        onDelete={handleDeleteConversation}
-        onRename={(id, title) =>
-          setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)))
-        }
-        open={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
+        meetings={meetings}
+        selectedIds={selectedIds}
+        onToggle={toggleSelected}
+        onClearAll={clearSelection}
+        loading={loadingMeetings}
       />
-
-      <div className="flex flex-col flex-1 min-w-0">
-        <TopBar onToggleSidebar={() => setSidebarOpen((o) => !o)} />
-
-        {isEmpty ? (
-          <div className="flex flex-col flex-1 items-center justify-center px-6 pb-12 gap-6">
-            <div className="text-center">
-              <h1 className="text-2xl font-semibold text-foreground">What are you working on?</h1>
-              <p className="text-sm text-muted mt-1">Ask anything about your meeting transcripts.</p>
-            </div>
-
-            <div className="w-full max-w-2xl">
-              <InputBar onSend={handleSend} disabled={loading} variant="centered" meetings={meetings} />
-            </div>
-
-            <div className="flex flex-wrap gap-2 justify-center max-w-2xl">
-              {SUGGESTIONS.map((s) => (
-                <button
-                  key={s}
-                  onClick={() => handleSend(s)}
-                  className="rounded-full border border-border px-4 py-1.5 text-sm text-muted hover:border-accent/50 hover:text-foreground hover:bg-accent/5 transition-all"
-                >
-                  {s}
-                </button>
-              ))}
+      <section className="flex flex-1 flex-col">
+        <header className="flex flex-col gap-2 border-b border-border bg-surface px-6 py-3">
+          <div className="flex items-center justify-between">
+            <h1 className="text-sm font-semibold">Chat</h1>
+            <div className="flex items-center gap-3">
+              <AccessFilterToggle value={accessFilter} onChange={setAccessFilter} />
+              <a href="/ingest" className="text-xs text-muted hover:text-foreground">Ingest →</a>
             </div>
           </div>
-        ) : (
-          <>
-            <div className="flex-1 overflow-y-auto py-6">
-              <div className="mx-auto w-full max-w-3xl px-6 space-y-4">
-                {messages.map((msg, i) => {
-                  const isLastAssistant =
-                    msg.role === 'assistant' &&
-                    messages.slice(i + 1).every((m) => m.role !== 'assistant');
-                  return (
-                    <ChatBubble
-                      key={msg.id}
-                      message={isLastAssistant ? msg : { ...msg, suggestions: [] }}
-                      onEdit={handleEdit}
-                      onRegenerate={handleRegenerate}
-                      onSourceClick={(_meetingId, meetingTitle) =>
-                        handleSend(`Tell me more about the "${meetingTitle}" meeting`)
-                      }
-                      onSuggestionClick={(text) => handleSend(text, activeScopeMeetingId)}
-                    />
-                  );
-                })}
-
-                {loading && (
-                  <div className="flex justify-start">
-                    <div className="bg-bubble-assistant rounded-2xl rounded-bl-sm px-4 py-3">
-                      <TypingIndicator />
-                    </div>
-                  </div>
-                )}
-
-                <div ref={bottomRef} />
-              </div>
+          {rbacInfo?.capped && (
+            <div className="rounded-md border border-accent/30 bg-accent/5 px-3 py-1.5 text-xs text-foreground">
+              Showing the {rbacInfo.visible} most-recent of {rbacInfo.total} accessible
+              meetings (last {rbacInfo.within_days} days). Older meetings are outside
+              the searchable window.
             </div>
-
-            <InputBar onSend={handleSend} disabled={loading} variant="bottom" meetings={meetings} />
-          </>
-        )}
-      </div>
-    </>
+          )}
+        </header>
+        <ChatThread
+          turns={turns}
+          onApplyScope={applyScope}
+          onRetry={handleRetry}
+        />
+        <ChatInput onSubmit={handleSubmit} disabled={sending || !idToken} />
+      </section>
+    </main>
   );
 }
 
-function TypingIndicator() {
-  return (
-    <div className="flex items-center gap-1 h-4">
-      {[0, 1, 2].map((i) => (
-        <span
-          key={i}
-          className="h-2 w-2 rounded-full bg-muted animate-bounce"
-          style={{ animationDelay: `${i * 0.15}s` }}
-        />
-      ))}
-    </div>
-  );
+function makeId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
